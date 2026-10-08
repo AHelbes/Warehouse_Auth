@@ -1,438 +1,212 @@
-
-import { useEffect, useState } from "react";
+import { useEffect, useState, type CSSProperties, type FormEvent } from "react";
 import { supabase } from "./supabaseClient";
 
-type Page = "signup" | "forgot";
-type AuthMode = "invite" | "recovery" | null;
+type AuthMode = "recovery" | "invite" | null;
 
 export default function App() {
   const [ready, setReady] = useState(false);
-  const [page, setPage] = useState<Page>("signup");
   const [authMode, setAuthMode] = useState<AuthMode>(null);
   const [hasSession, setHasSession] = useState(false);
-
   const [email, setEmail] = useState("");
   const [password, setPassword] = useState("");
   const [confirmPassword, setConfirmPassword] = useState("");
   const [message, setMessage] = useState("");
   const [busy, setBusy] = useState(false);
+  const [completed, setCompleted] = useState(false);
 
   useEffect(() => {
     let mounted = true;
-
-    const hash = new URLSearchParams(
-      window.location.hash.replace(/^#/, "")
-    );
+    const hash = new URLSearchParams(window.location.hash.replace(/^#/, ""));
     const query = new URLSearchParams(window.location.search);
-
     const linkType = hash.get("type") ?? query.get("type");
-    const linkError =
-      hash.get("error_description") ??
-      query.get("error_description");
+    const linkError = hash.get("error_description") ?? query.get("error_description");
+    const tokenHash = query.get("token_hash");
+    const code = query.get("code");
 
-    if (linkError) {
-      setMessage(linkError.replace(/\+/g, " "));
+    if (linkType === "recovery" || linkType === "invite") {
+      setAuthMode(linkType);
     }
+    if (linkError) setMessage(linkError.replace(/\+/g, " "));
 
-    if (linkType === "invite") {
-      setAuthMode("invite");
-      setPage("signup");
-    } else if (linkType === "recovery") {
-      setAuthMode("recovery");
-      setPage("forgot");
-    }
-
-    const { data: listener } = supabase.auth.onAuthStateChange(
-      (event, session) => {
-        if (!mounted) return;
-
-        setHasSession(!!session);
-
-        if (event === "PASSWORD_RECOVERY") {
-          setAuthMode("recovery");
-          setPage("forgot");
-        }
-      }
-    );
-
-    supabase.auth.getSession().then(({ data, error }) => {
+    const { data: listener } = supabase.auth.onAuthStateChange((event, session) => {
       if (!mounted) return;
-
-      setHasSession(!!data.session);
-      if (error) setMessage(error.message);
-      setReady(true);
+      setHasSession(!!session);
+      if (event === "PASSWORD_RECOVERY") setAuthMode("recovery");
     });
 
+    async function initialize() {
+      try {
+        // Supabase normally processes URL fragments and PKCE codes automatically
+        // when detectSessionInUrl is enabled in supabaseClient.
+        // Token-hash links require an explicit verification step.
+        if (tokenHash && (linkType === "recovery" || linkType === "invite")) {
+          const { error } = await supabase.auth.verifyOtp({
+            token_hash: tokenHash,
+            type: linkType,
+          });
+          if (error) throw error;
+          window.history.replaceState({}, "", window.location.pathname);
+        } else if (code) {
+          // If the client has already exchanged the code, a session may exist.
+          const { data } = await supabase.auth.getSession();
+          if (!data.session) {
+            const { error } = await supabase.auth.exchangeCodeForSession(code);
+            if (error) throw error;
+          }
+        }
+
+        const { data, error } = await supabase.auth.getSession();
+        if (error) throw error;
+        if (!mounted) return;
+        setHasSession(!!data.session);
+      } catch (err) {
+        if (mounted) {
+          setMessage(err instanceof Error ? err.message : "Invalid or expired link. Request a new reset email.");
+        }
+      } finally {
+        if (mounted) setReady(true);
+      }
+    }
+
+    void initialize();
     return () => {
       mounted = false;
       listener.subscription.unsubscribe();
     };
   }, []);
 
-  const canSetPassword = hasSession && authMode !== null;
+  const canSetPassword = !completed && hasSession && authMode !== null;
 
-  function switchPage(next: Page) {
-    setPage(next);
-    setMessage("");
-    setPassword("");
-    setConfirmPassword("");
-  }
-
-  async function savePassword(e: React.FormEvent<HTMLFormElement>) {
-  e.preventDefault();
-
-  if (busy) return;
-
-  if (password.length < 12) {
-    setMessage("Password must contain at least 12 characters.");
-    return;
-  }
-
-  if (password !== confirmPassword) {
-    setMessage("Passwords do not match.");
-    return;
-  }
-
-  setBusy(true);
-  setMessage("");
-
-  try {
-    const { data: sessionData, error: sessionError } =
-      await supabase.auth.getSession();
-
-    if (sessionError) throw sessionError;
-
-    if (!sessionData.session) {
-      setMessage(
-        "Your password reset link has expired or is invalid. Please request a new reset email."
-      );
-      return;
-    }
-
-    if (authMode === null) {
-      setMessage("Please open your password reset or invitation link.");
-      return;
-    }
-
-    const { error: updateError } = await supabase.auth.updateUser({
-      password,
-    });
-
-    if (updateError) throw updateError;
-
-    await supabase.auth.signOut();
-
-    setHasSession(false);
-    setAuthMode(null);
-    setPassword("");
-    setConfirmPassword("");
-
-    window.history.replaceState(
-      {},
-      "",
-      window.location.pathname
-    );
-
-    setMessage(
-      "Password updated successfully! You can now log in to the Warehouse Desktop App."
-    );
-  } catch (err) {
-    console.error("Password update failed:", err);
-
-    setMessage(
-      err instanceof Error
-        ? err.message
-        : "Something went wrong while updating your password."
-    );
-  } finally {
-    setBusy(false);
-  }
-}
-
-  async function requestReset(e: React.FormEvent<HTMLFormElement>) {
+  async function savePassword(e: FormEvent<HTMLFormElement>) {
     e.preventDefault();
+    if (busy) return;
+    if (password.length < 12) {
+      setMessage("Password must contain at least 12 characters.");
+      return;
+    }
+    if (password !== confirmPassword) {
+      setMessage("Passwords do not match.");
+      return;
+    }
+
     setBusy(true);
     setMessage("");
-
-    const { error } = await supabase.auth.resetPasswordForEmail(
-      email.trim(),
-      {
-        redirectTo: window.location.origin + "/",
+    try {
+      const { data, error: sessionError } = await supabase.auth.getSession();
+      if (sessionError) throw sessionError;
+      if (!data.session || !authMode) {
+        throw new Error("Your password link is invalid or expired. Please request a new reset email.");
       }
-    );
 
-    setMessage(
-      error
-        ? error.message
-        : "If this email is registered, a password reset link will be sent."
-    );
+      const { error: updateError } = await supabase.auth.updateUser({ password });
+      if (updateError) throw updateError;
 
-    setBusy(false);
+      // Password has been saved at this point. Sign-out failure must not hide success.
+      setCompleted(true);
+      setAuthMode(null);
+      setHasSession(false);
+      setPassword("");
+      setConfirmPassword("");
+      window.history.replaceState({}, "", window.location.pathname);
+      setMessage("Password saved successfully! You can now sign in to the Warehouse Desktop App.");
+      const { error: signOutError } = await supabase.auth.signOut();
+      if (signOutError) console.warn("Sign out after password update:", signOutError);
+    } catch (err) {
+      console.error("Password update failed:", err);
+      setMessage(err instanceof Error ? err.message : "Could not update your password. Please try again.");
+    } finally {
+      setBusy(false);
+    }
   }
 
-  const styles = {
-    page: {
-      minHeight: "100vh",
-      background: "#f4f6f9",
-      display: "flex",
-      alignItems: "center",
-      justifyContent: "center",
-      padding: 20,
-      fontFamily: "Arial, Helvetica, sans-serif",
-    } as React.CSSProperties,
+  async function requestReset(e: FormEvent<HTMLFormElement>) {
+    e.preventDefault();
+    if (busy) return;
+    setBusy(true);
+    setMessage("");
+    try {
+      const { error } = await supabase.auth.resetPasswordForEmail(email.trim(), {
+        redirectTo: `${window.location.origin}/`,
+      });
+      if (error) throw error;
+      setMessage("If this email is registered, a password reset link will be sent.");
+    } catch (err) {
+      setMessage(err instanceof Error ? err.message : "Unable to send reset email.");
+    } finally {
+      setBusy(false);
+    }
+  }
 
-    card: {
-      width: "100%",
-      maxWidth: 420,
-      background: "#ffffff",
-      borderRadius: 14,
-      padding: 32,
-      boxShadow: "0 8px 30px rgba(0,0,0,0.08)",
-    } as React.CSSProperties,
-
-    tabs: {
-      display: "flex",
-      gap: 8,
-      marginTop: 24,
-      marginBottom: 26,
-    } as React.CSSProperties,
-
-    input: {
-      width: "100%",
-      boxSizing: "border-box",
-      padding: "13px 14px",
-      marginTop: 7,
-      marginBottom: 16,
-      border: "1px solid #d1d5db",
-      borderRadius: 8,
-      fontSize: 14,
-    } as React.CSSProperties,
-
-    button: {
-      width: "100%",
-      padding: 14,
-      background: "#1d4ed8",
-      color: "white",
-      border: "none",
-      borderRadius: 8,
-      fontSize: 14,
-      fontWeight: 600,
-      cursor: "pointer",
-      marginTop: 8,
-    } as React.CSSProperties,
+  const page: CSSProperties = {
+    minHeight: "100vh", background: "#f4f6f9", display: "flex",
+    alignItems: "center", justifyContent: "center", padding: 20,
+    fontFamily: "Arial, Helvetica, sans-serif",
+  };
+  const card: CSSProperties = {
+    width: "100%", maxWidth: 420, background: "white", borderRadius: 14,
+    padding: 32, boxShadow: "0 8px 30px rgba(0,0,0,0.08)",
+  };
+  const input: CSSProperties = {
+    width: "100%", boxSizing: "border-box", padding: "13px 14px", marginTop: 7,
+    marginBottom: 16, border: "1px solid #d1d5db", borderRadius: 8, fontSize: 14,
+  };
+  const button: CSSProperties = {
+    width: "100%", padding: 14, background: "#1d4ed8", color: "white",
+    border: "none", borderRadius: 8, fontSize: 14, fontWeight: 600,
+    cursor: "pointer", marginTop: 8,
   };
 
-  if (!ready) {
-    return (
-      <main style={styles.page}>
-        <p>Checking account link...</p>
-      </main>
-    );
-  }
-
   return (
-    <main style={styles.page}>
-      <div style={styles.card}>
-        <h1 style={{
-          margin: 0,
-          textAlign: "center",
-          fontSize: 25,
-          color: "#111827",
-        }}>
+    <main style={page}>
+      <div style={card}>
+        <h1 style={{ margin: 0, textAlign: "center", fontSize: 25, color: "#111827" }}>
           Warehouse Account
         </h1>
-
-        <p style={{
-          textAlign: "center",
-          color: "#6b7280",
-          fontSize: 14,
-          marginTop: 10,
-        }}>
-          Employee Account Management
+        <p style={{ textAlign: "center", color: "#6b7280", fontSize: 14, marginTop: 10 }}>
+          Password Management
         </p>
 
-        <div style={styles.tabs}>
-          <button
-            type="button"
-            onClick={() => switchPage("signup")}
-            style={{
-              flex: 1,
-              padding: 12,
-              borderRadius: 8,
-              cursor: "pointer",
-              fontWeight: 600,
-              border: page === "signup"
-                ? "1px solid #1d4ed8"
-                : "1px solid #d1d5db",
-              background: page === "signup"
-                ? "#1d4ed8"
-                : "#ffffff",
-              color: page === "signup"
-                ? "#ffffff"
-                : "#374151",
-            }}
-          >
-            Sign Up
-          </button>
-
-          <button
-            type="button"
-            onClick={() => switchPage("forgot")}
-            style={{
-              flex: 1,
-              padding: 12,
-              borderRadius: 8,
-              cursor: "pointer",
-              fontWeight: 600,
-              border: page === "forgot"
-                ? "1px solid #1d4ed8"
-                : "1px solid #d1d5db",
-              background: page === "forgot"
-                ? "#1d4ed8"
-                : "#ffffff",
-              color: page === "forgot"
-                ? "#ffffff"
-                : "#374151",
-            }}
-          >
-            Forgot Password
-          </button>
-        </div>
-
-        {canSetPassword ? (
+        {!ready ? (
+          <p>Checking account link...</p>
+        ) : canSetPassword ? (
           <form onSubmit={savePassword}>
             <h2 style={{ fontSize: 19 }}>
-              {authMode === "invite"
-                ? "Create Your Password"
-                : "Reset Your Password"}
+              {authMode === "invite" ? "Create Your Password" : "Reset Your Password"}
             </h2>
-
             <p style={{ color: "#6b7280", fontSize: 14 }}>
-              {authMode === "invite"
-                ? "Your invitation was accepted. Create a password to activate your account."
-                : "Enter a new password for your warehouse account."}
+              Enter and confirm your new warehouse account password.
             </p>
-
-            <label htmlFor="new-password">
-              New Password
-            </label>
-            <input
-              id="new-password"
-              type="password"
-              placeholder="At least 12 characters"
-              value={password}
-              onChange={(e) => setPassword(e.target.value)}
-              autoComplete="new-password"
-              style={styles.input}
-              required
-            />
-
-            <label htmlFor="confirm-password">
-              Confirm Password
-            </label>
-            <input
-              id="confirm-password"
-              type="password"
-              placeholder="Confirm your password"
-              value={confirmPassword}
-              onChange={(e) => setConfirmPassword(e.target.value)}
-              autoComplete="new-password"
-              style={styles.input}
-              required
-            />
-
-            <button
-              type="submit"
-              disabled={busy}
-              style={styles.button}
-            >
+            <label htmlFor="new-password">New Password</label>
+            <input id="new-password" type="password" placeholder="At least 12 characters"
+              value={password} onChange={(e) => setPassword(e.target.value)}
+              autoComplete="new-password" style={input} minLength={12} required />
+            <label htmlFor="confirm-password">Confirm Password</label>
+            <input id="confirm-password" type="password" placeholder="Confirm your password"
+              value={confirmPassword} onChange={(e) => setConfirmPassword(e.target.value)}
+              autoComplete="new-password" style={input} required />
+            <button type="submit" disabled={busy} style={{ ...button, opacity: busy ? 0.6 : 1 }}>
               {busy ? "Saving..." : "Save Password"}
             </button>
           </form>
-        ) : page === "signup" ? (
-          <div>
-            <h2 style={{ fontSize: 19 }}>
-              Employee Sign Up
-            </h2>
-
-            <p style={{
-              color: "#6b7280",
-              fontSize: 14,
-              lineHeight: 1.7,
-            }}>
-              Warehouse accounts are invitation-only.
-              To create your account, please open the
-              invitation link sent to your email by your
-              administrator.
-            </p>
-
-            <div style={{
-              background: "#eff6ff",
-              padding: 16,
-              borderRadius: 8,
-              color: "#1e40af",
-              fontSize: 13,
-              lineHeight: 1.7,
-            }}>
-              Already received an invitation?
-              Open the invitation email and click
-              <strong> Accept Invite</strong> to set
-              your password.
-            </div>
-          </div>
-        ) : (
+        ) : !completed ? (
           <form onSubmit={requestReset}>
-            <h2 style={{ fontSize: 19 }}>
-              Forgot Password?
-            </h2>
-
-            <p style={{
-              color: "#6b7280",
-              fontSize: 14,
-              lineHeight: 1.6,
-            }}>
-              Enter your registered email address.
-              We'll send you a link to reset your password.
+            <h2 style={{ fontSize: 19 }}>Forgot Password?</h2>
+            <p style={{ color: "#6b7280", fontSize: 14, lineHeight: 1.6 }}>
+              Enter your registered email address. We'll send you a link to reset your password.
             </p>
-
-            <label htmlFor="email">
-              Email Address
-            </label>
-            <input
-              id="email"
-              type="email"
-              placeholder="employee@company.com"
-              value={email}
-              onChange={(e) => setEmail(e.target.value)}
-              autoComplete="email"
-              style={styles.input}
-              required
-            />
-
-            <button
-              type="submit"
-              disabled={busy}
-              style={styles.button}
-            >
-              {busy
-                ? "Sending..."
-                : "Send Reset Email"}
+            <label htmlFor="email">Email Address</label>
+            <input id="email" type="email" placeholder="employee@company.com"
+              value={email} onChange={(e) => setEmail(e.target.value)}
+              autoComplete="email" style={input} required />
+            <button type="submit" disabled={busy} style={{ ...button, opacity: busy ? 0.6 : 1 }}>
+              {busy ? "Sending..." : "Send Reset Email"}
             </button>
           </form>
-        )}
+        ) : null}
 
         {message && (
-          <p
-            role="status"
-            style={{
-              marginTop: 20,
-              padding: 12,
-              borderRadius: 8,
-              background: "#f3f4f6",
-              fontSize: 13,
-              lineHeight: 1.5,
-            }}
-          >
+          <p role="status" style={{ marginTop: 20, padding: 12, borderRadius: 8,
+            background: "#f3f4f6", fontSize: 13, lineHeight: 1.5 }}>
             {message}
           </p>
         )}
