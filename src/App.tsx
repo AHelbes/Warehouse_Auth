@@ -79,52 +79,75 @@ export default function App() {
   }
 
   async function savePassword(e: React.FormEvent<HTMLFormElement>) {
-    e.preventDefault();
+  e.preventDefault();
 
-    if (!canSetPassword) {
-      setMessage("Please open a valid invitation or recovery link.");
+  if (busy) return;
+
+  if (password.length < 12) {
+    setMessage("Password must contain at least 12 characters.");
+    return;
+  }
+
+  if (password !== confirmPassword) {
+    setMessage("Passwords do not match.");
+    return;
+  }
+
+  setBusy(true);
+  setMessage("");
+
+  try {
+    const { data: sessionData, error: sessionError } =
+      await supabase.auth.getSession();
+
+    if (sessionError) throw sessionError;
+
+    if (!sessionData.session) {
+      setMessage(
+        "Your password reset link has expired or is invalid. Please request a new reset email."
+      );
       return;
     }
 
-    if (password.length < 12) {
-      setMessage("Password must contain at least 12 characters.");
+    if (authMode === null) {
+      setMessage("Please open your password reset or invitation link.");
       return;
     }
 
-    if (password !== confirmPassword) {
-      setMessage("Passwords do not match.");
-      return;
-    }
-
-    setBusy(true);
-    setMessage("");
-
-    const { error } = await supabase.auth.updateUser({
+    const { error: updateError } = await supabase.auth.updateUser({
       password,
     });
 
-    if (error) {
-      setMessage(error.message);
-    } else {
-      await supabase.auth.signOut();
-      setHasSession(false);
-      setAuthMode(null);
-      setPassword("");
-      setConfirmPassword("");
+    if (updateError) throw updateError;
 
-      window.history.replaceState(
-        {},
-        "",
-        window.location.pathname
-      );
+    await supabase.auth.signOut();
 
-      setMessage(
-        "Password saved successfully! You can now log in to the Warehouse Desktop App."
-      );
-    }
+    setHasSession(false);
+    setAuthMode(null);
+    setPassword("");
+    setConfirmPassword("");
 
+    window.history.replaceState(
+      {},
+      "",
+      window.location.pathname
+    );
+
+    setMessage(
+      "Password updated successfully! You can now log in to the Warehouse Desktop App."
+    );
+  } catch (err) {
+    console.error("Password update failed:", err);
+
+    setMessage(
+      err instanceof Error
+        ? err.message
+        : "Something went wrong while updating your password."
+    );
+  } finally {
     setBusy(false);
   }
+}
 
   async function requestReset(e: React.FormEvent<HTMLFormElement>) {
     e.preventDefault();
