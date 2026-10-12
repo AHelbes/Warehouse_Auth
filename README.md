@@ -73,3 +73,5 @@ export default defineConfig([
 ])
 
 ```
+
+[![Deploy with Vercel](https://vercel.com)](https://vercel.com)
