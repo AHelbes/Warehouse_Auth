@@ -74,4 +74,4 @@ export default defineConfig([
 
 ```
 
-[[Deploy with Vercel](warehouse-auth-mbjqpt40f-adv-e990.vercel.app)](https://vercel.com)
+[[Deploy with Vercel](warehouse-auth-mbjqpt40f-adv-e990.vercel.app)]((https://warehouse-auth-dusky.vercel.app/))
